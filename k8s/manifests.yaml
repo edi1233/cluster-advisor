@@ -14,21 +14,16 @@ kind: ClusterRole
 metadata:
   name: k8s-ai-ops-reader
 rules:
+  # Read-only across every API group/resource (built-ins + CRDs) so the portal's
+  # live discovery can browse anything installed on the cluster. get/list/watch
+  # only -- no create/update/patch/delete/exec. Secret values are separately
+  # redacted at the app layer regardless of this RBAC scope.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["nodes", "pods", "pods/log", "events", "namespaces", "services", "configmaps", "secrets", "persistentvolumeclaims"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["batch"]
-    resources: ["jobs", "cronjobs"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["httproutes"]
-    verbs: ["get", "list", "watch"]
+    resources: ["pods/log"]
+    verbs: ["get"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["nodes", "pods"]
     verbs: ["get", "list"]
@@ -108,7 +103,7 @@ spec:
       serviceAccountName: k8s-ai-ops
       containers:
         - name: app
-          image: harbor.edi-it.com/airuneers/k8s-ai-ops:v3
+          image: harbor.edi-it.com/airuneers/k8s-ai-ops:v4
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
