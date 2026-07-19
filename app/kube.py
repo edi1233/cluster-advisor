@@ -1,5 +1,6 @@
 import logging
 import tempfile
+import time
 
 import yaml
 from kubernetes import client as k8s_client
@@ -11,26 +12,8 @@ from . import db
 
 log = logging.getLogger("k8s-ai-ops")
 
-# (label, apiVersion, kind, namespaced)
-RESOURCE_KINDS = [
-    ("Pods", "v1", "Pod", True),
-    ("Deployments", "apps/v1", "Deployment", True),
-    ("StatefulSets", "apps/v1", "StatefulSet", True),
-    ("DaemonSets", "apps/v1", "DaemonSet", True),
-    ("ReplicaSets", "apps/v1", "ReplicaSet", True),
-    ("Services", "v1", "Service", True),
-    ("ConfigMaps", "v1", "ConfigMap", True),
-    ("Secrets", "v1", "Secret", True),
-    ("PersistentVolumeClaims", "v1", "PersistentVolumeClaim", True),
-    ("Jobs", "batch/v1", "Job", True),
-    ("CronJobs", "batch/v1", "CronJob", True),
-    ("Ingresses", "networking.k8s.io/v1", "Ingress", True),
-    ("HTTPRoutes", "gateway.networking.k8s.io/v1", "HTTPRoute", True),
-    ("Events", "v1", "Event", True),
-    ("Nodes", "v1", "Node", False),
-    ("Namespaces", "v1", "Namespace", False),
-]
-KIND_INDEX = {k: (av, k, ns) for _, av, k, ns in RESOURCE_KINDS}
+KIND_CACHE_TTL = 60
+_kind_cache: dict[str, tuple[float, list[dict]]] = {}
 
 
 def _api_client_for(cluster_row: dict) -> k8s_client.ApiClient:
@@ -76,26 +59,87 @@ def test_connection(cluster_row: dict) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _discover_kinds(cluster_name: str) -> list[dict]:
+    """Live discovery of every listable resource type on the cluster (same data
+    'kubectl api-resources' uses) so built-ins and CRDs both show up automatically."""
+    row = db.get_cluster(cluster_name)
+    if not row:
+        raise ValueError(f"unknown cluster {cluster_name}")
+    api = _api_client_for(row)
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+
+    def add(group_version: str, resources: list[dict]):
+        for r in resources:
+            if "/" in r["name"]:  # skip subresources: pods/log, deployments/status, ...
+                continue
+            if "list" not in r.get("verbs", []):
+                continue
+            key = (group_version, r["kind"])
+            if key in seen:
+                continue
+            seen.add(key)
+            slug = f"{r['kind']}-{group_version.replace('/', '-')}"
+            label = r["kind"] if group_version == "v1" else f"{r['kind']} ({group_version})"
+            out.append({
+                "slug": slug, "label": label, "kind": r["kind"],
+                "api_version": group_version, "namespaced": bool(r.get("namespaced", True)),
+            })
+
+    core = api.call_api("/api/v1", "GET", response_type=object, auth_settings=["BearerToken"])[0]
+    add("v1", core.get("resources", []))
+
+    groups = api.call_api("/apis", "GET", response_type=object, auth_settings=["BearerToken"])[0]
+    for g in groups.get("groups", []):
+        gv = g["preferredVersion"]["groupVersion"]
+        try:
+            rl = api.call_api(f"/apis/{gv}", "GET", response_type=object, auth_settings=["BearerToken"])[0]
+        except ApiException as e:
+            log.warning("discovery failed for %s: %s", gv, e)
+            continue
+        add(gv, rl.get("resources", []))
+
+    return sorted(out, key=lambda k: k["label"])
+
+
+def list_kinds(cluster_name: str) -> list[dict]:
+    now = time.time()
+    cached = _kind_cache.get(cluster_name)
+    if cached and now - cached[0] < KIND_CACHE_TTL:
+        return cached[1]
+    kinds = _discover_kinds(cluster_name)
+    _kind_cache[cluster_name] = (now, kinds)
+    return kinds
+
+
+def kind_by_slug(cluster_name: str, slug: str) -> dict:
+    for k in list_kinds(cluster_name):
+        if k["slug"] == slug:
+            return k
+    raise ValueError(f"unknown kind {slug}")
+
+
 def list_namespaces(cluster_name: str) -> list[str]:
     dyn = dynamic_client(cluster_name)
     res = dyn.resources.get(api_version="v1", kind="Namespace")
     return sorted(item.metadata.name for item in res.get().items)
 
 
-def list_objects(cluster_name: str, namespace: str | None, kind: str) -> list[dict]:
-    av, k, namespaced = KIND_INDEX[kind]
+def list_objects(cluster_name: str, namespace: str | None, slug: str) -> list[dict]:
+    meta = kind_by_slug(cluster_name, slug)
+    av, k, namespaced = meta["api_version"], meta["kind"], meta["namespaced"]
     dyn = dynamic_client(cluster_name)
     res = dyn.resources.get(api_version=av, kind=k)
     items = res.get(namespace=namespace).items if namespaced else res.get().items
     out = []
     for it in items:
         d = it.to_dict()
-        meta = d.get("metadata", {})
+        m = d.get("metadata", {})
         status = d.get("status", {})
         row = {
-            "name": meta.get("name"),
-            "namespace": meta.get("namespace"),
-            "age": meta.get("creationTimestamp"),
+            "name": m.get("name"),
+            "namespace": m.get("namespace"),
+            "age": m.get("creationTimestamp"),
         }
         if k == "Pod":
             row["phase"] = status.get("phase")
@@ -119,16 +163,17 @@ def _redact(d: dict, kind: str) -> dict:
     return d
 
 
-def get_object(cluster_name: str, namespace: str | None, kind: str, name: str) -> dict:
-    av, k, namespaced = KIND_INDEX[kind]
+def get_object(cluster_name: str, namespace: str | None, slug: str, name: str) -> dict:
+    meta = kind_by_slug(cluster_name, slug)
+    av, k, namespaced = meta["api_version"], meta["kind"], meta["namespaced"]
     dyn = dynamic_client(cluster_name)
     res = dyn.resources.get(api_version=av, kind=k)
     obj = res.get(name=name, namespace=namespace) if namespaced else res.get(name=name)
     return _redact(obj.to_dict(), k)
 
 
-def get_object_yaml(cluster_name: str, namespace: str | None, kind: str, name: str) -> str:
-    d = get_object(cluster_name, namespace, kind, name)
+def get_object_yaml(cluster_name: str, namespace: str | None, slug: str, name: str) -> str:
+    d = get_object(cluster_name, namespace, slug, name)
     return yaml.safe_dump(d, sort_keys=False, default_flow_style=False)
 
 
