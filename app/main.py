@@ -267,18 +267,20 @@ async def clusters_add(
 async def browse_cluster(cluster: str, _=Depends(require_auth)):
     try:
         namespaces = kube.list_namespaces(cluster)
+        kinds = kube.list_kinds(cluster)
     except Exception as e:  # noqa: BLE001
-        return _page("Browse", f"<h1>{cluster}</h1><p style='color:#f87171'>Error listing namespaces: {html.escape(str(e))}</p>")
+        return _page("Browse", f"<h1>{cluster}</h1><p style='color:#f87171'>Error discovering cluster: {html.escape(str(e))}</p>")
 
     kind_links_cluster_scope = "".join(
-        f"<a class='card' style='display:inline-block;margin-right:8px' href='/browse/{cluster}/{CLUSTER_SCOPE_NS}/{label}'>{label}</a>"
-        for label, _av, _k, ns in kube.RESOURCE_KINDS if not ns
+        f"<a class='card' style='display:inline-block;margin-right:8px' href='/browse/{cluster}/{CLUSTER_SCOPE_NS}/{k['slug']}'>{k['label']}</a>"
+        for k in kinds if not k["namespaced"]
     )
     ns_options = "".join(f"<option value='{n}'>{n}</option>" for n in namespaces)
-    kind_options = "".join(f"<option value='{label}'>{label}</option>" for label, _av, _k, ns in kube.RESOURCE_KINDS if ns)
+    kind_options = "".join(f"<option value='{k['slug']}'>{k['label']}</option>" for k in kinds if k["namespaced"])
 
     body = f"""
 <h1>Browse — {cluster}</h1>
+<p style="color:#9ca3af">{len(kinds)} resource types discovered live from this cluster's API (built-ins + CRDs).</p>
 <div class="card">
 <h3>Cluster-scoped</h3>
 {kind_links_cluster_scope}
@@ -299,11 +301,12 @@ async def browse_cluster(cluster: str, _=Depends(require_auth)):
 async def browse_list(cluster: str, namespace: str, kind: str, _=Depends(require_auth)):
     ns = None if namespace == CLUSTER_SCOPE_NS else namespace
     try:
+        meta = kube.kind_by_slug(cluster, kind)
         items = kube.list_objects(cluster, ns, kind)
     except Exception as e:  # noqa: BLE001
         return _page("Browse", f"<h1>{kind}</h1><p style='color:#f87171'>Error: {html.escape(str(e))}</p>")
 
-    extra_cols = [k for k in ("phase", "ready", "restarts", "node", "type", "keys") if any(k in i for i in items)]
+    extra_cols = [c for c in ("phase", "ready", "restarts", "node", "type", "keys") if any(c in i for i in items)]
     header = "<th>Namespace</th><th>Name</th>" + "".join(f"<th>{c}</th>" for c in extra_cols)
     rows = ""
     for it in items:
@@ -315,19 +318,21 @@ async def browse_list(cluster: str, namespace: str, kind: str, _=Depends(require
         rows += "</tr>"
 
     body = f"""
-<h1>{kind} — {cluster}{' / ' + namespace if ns else ''}</h1>
+<h1>{meta['label']} — {cluster}{' / ' + namespace if ns else ''}</h1>
 <p><a href="/browse/{cluster}">back to browse</a></p>
 <table><tr>{header}</tr>{rows or f"<tr><td colspan={2+len(extra_cols)}>No objects found</td></tr>"}</table>
 """
-    return _page(kind, body)
+    return _page(meta["label"], body)
 
 
 @app.get("/browse/{cluster}/{namespace}/{kind}/{name}", response_class=HTMLResponse)
 async def browse_detail(cluster: str, namespace: str, kind: str, name: str, _=Depends(require_auth)):
     ns = None if namespace == CLUSTER_SCOPE_NS else namespace
     try:
+        meta = kube.kind_by_slug(cluster, kind)
         yaml_text = kube.get_object_yaml(cluster, ns, kind, name)
     except Exception as e:  # noqa: BLE001
+        meta = {"label": kind, "kind": kind}
         yaml_text = f"(error fetching object: {e})"
 
     events = kube.related_events(cluster, ns, name) if ns else []
@@ -336,7 +341,7 @@ async def browse_detail(cluster: str, namespace: str, kind: str, name: str, _=De
     ) or "<tr><td colspan=4>No related events</td></tr>"
 
     logs_html = ""
-    if kind == "Pods" and ns:
+    if meta["kind"] == "Pod" and ns:
         logs = kube.pod_log_tail(cluster, ns, name)
         logs_html = f"<h2>Recent logs (tail)</h2><pre>{html.escape(logs)}</pre>"
 
@@ -348,7 +353,7 @@ async def browse_detail(cluster: str, namespace: str, kind: str, name: str, _=De
     ) or "<p>No questions asked yet.</p>"
 
     body = f"""
-<h1>{kind}/{name}</h1>
+<h1>{meta['label']}/{name}</h1>
 <p>{cluster}{' / ' + ns if ns else ''} · <a href="/browse/{cluster}/{namespace}/{kind}">back to list</a></p>
 <h2>Object</h2>
 <pre>{html.escape(yaml_text)}</pre>
@@ -363,7 +368,7 @@ async def browse_detail(cluster: str, namespace: str, kind: str, name: str, _=De
   <button type="submit">Ask AI</button>
 </form>
 """
-    return _page(f"{kind}/{name}", body)
+    return _page(f"{meta['label']}/{name}", body)
 
 
 @app.post("/browse/{cluster}/{namespace}/{kind}/{name}/ask")
