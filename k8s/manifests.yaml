@@ -56,6 +56,15 @@ data:
     {}
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k8s-ai-ops-companion-answers
+  namespace: k8s-ai-ops
+data:
+  answers.json: |
+    {}
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: k8s-ai-ops-portal-auth
@@ -99,7 +108,7 @@ spec:
       serviceAccountName: k8s-ai-ops
       containers:
         - name: app
-          image: harbor.edi-it.com/airuneers/k8s-ai-ops:v2
+          image: harbor.edi-it.com/airuneers/k8s-ai-ops:v3
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
@@ -131,12 +140,17 @@ spec:
           volumeMounts:
             - name: deepdive
               mountPath: /data/deepdive
+            - name: companion-answers
+              mountPath: /data/companion-answers
             - name: data
               mountPath: /data/db
       volumes:
         - name: deepdive
           configMap:
             name: k8s-ai-ops-deepdive
+        - name: companion-answers
+          configMap:
+            name: k8s-ai-ops-companion-answers
         - name: data
           persistentVolumeClaim:
             claimName: k8s-ai-ops-data
