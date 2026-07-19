@@ -15,10 +15,19 @@ metadata:
   name: k8s-ai-ops-reader
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods", "events", "namespaces", "services", "persistentvolumeclaims"]
+    resources: ["nodes", "pods", "pods/log", "events", "namespaces", "services", "configmaps", "secrets", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["nodes", "pods"]
@@ -46,6 +55,28 @@ data:
   report.json: |
     {}
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: k8s-ai-ops-portal-auth
+  namespace: k8s-ai-ops
+type: Opaque
+stringData:
+  PORTAL_USER: admin
+  PORTAL_PASSWORD: "xLyFYSOQ9xFrlxXtIvk6Sg"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k8s-ai-ops-data
+  namespace: k8s-ai-ops
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -55,6 +86,8 @@ metadata:
     app.kubernetes.io/name: k8s-ai-ops
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: k8s-ai-ops
@@ -66,12 +99,18 @@ spec:
       serviceAccountName: k8s-ai-ops
       containers:
         - name: app
-          image: harbor.edi-it.com/airuneers/k8s-ai-ops:latest
+          image: harbor.edi-it.com/airuneers/k8s-ai-ops:v2
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
           env:
             - name: REFRESH_SECONDS
               value: "120"
+            - name: DB_PATH
+              value: "/data/db/app.db"
+          envFrom:
+            - secretRef:
+                name: k8s-ai-ops-portal-auth
           resources:
             requests:
               cpu: 25m
@@ -92,10 +131,15 @@ spec:
           volumeMounts:
             - name: deepdive
               mountPath: /data/deepdive
+            - name: data
+              mountPath: /data/db
       volumes:
         - name: deepdive
           configMap:
             name: k8s-ai-ops-deepdive
+        - name: data
+          persistentVolumeClaim:
+            claimName: k8s-ai-ops-data
 ---
 apiVersion: v1
 kind: Service
