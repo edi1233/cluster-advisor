@@ -17,6 +17,7 @@ log = logging.getLogger("k8s-ai-ops")
 
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", "120"))
 DEEPDIVE_PATH = os.environ.get("DEEPDIVE_PATH", "/data/deepdive/report.json")
+COMPANION_ANSWERS_PATH = os.environ.get("COMPANION_ANSWERS_PATH", "/data/companion-answers/answers.json")
 
 app = FastAPI(title="k8s-ai-ops")
 
@@ -32,6 +33,7 @@ async def startup():
     db.init_db()
     core, apps_api, custom = load_client()
     asyncio.create_task(_loop())
+    asyncio.create_task(_companion_sync_loop())
 
 
 async def _loop():
@@ -43,6 +45,25 @@ async def _loop():
             log.exception("analysis failed")
             state["error"] = str(e)
         await asyncio.sleep(REFRESH_SECONDS)
+
+
+async def _companion_sync_loop():
+    """Pick up answers the scheduled AI responder writes into a ConfigMap (mounted read-only)
+    and copy any new ones into SQLite so the portal can render them."""
+    while True:
+        try:
+            if os.path.exists(COMPANION_ANSWERS_PATH):
+                with open(COMPANION_ANSWERS_PATH) as f:
+                    answers = json.load(f)
+                for qid_str, answer_text in answers.items():
+                    if not answer_text:
+                        continue
+                    q = db.get_question(int(qid_str))
+                    if q and not q["answer"]:
+                        db.answer_question(int(qid_str), answer_text)
+        except Exception:  # noqa: BLE001
+            log.exception("companion answer sync failed")
+        await asyncio.sleep(20)
 
 
 def _read_deepdive():
@@ -78,12 +99,6 @@ async def api_deepdive():
 @app.get("/api/companion/pending")
 async def api_companion_pending():
     return JSONResponse(db.list_pending_questions())
-
-
-@app.post("/api/companion/{qid}/answer")
-async def api_companion_answer(qid: int, payload: dict):
-    db.answer_question(qid, payload.get("answer", ""))
-    return {"ok": True}
 
 
 # ---- page chrome ----
