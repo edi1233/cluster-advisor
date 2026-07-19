@@ -103,7 +103,7 @@ spec:
       serviceAccountName: k8s-ai-ops
       containers:
         - name: app
-          image: harbor.edi-it.com/airuneers/k8s-ai-ops:v4
+          image: harbor.edi-it.com/airuneers/k8s-ai-ops:v5
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
